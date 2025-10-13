@@ -17,7 +17,8 @@ A terminal-based application to fetch and display a player's League of Legends s
 
 | Description | Screenshot |
 | :--- | :--- |
-| **Search Screen** | *Screenshot of the search screen* |
+| **Search Screen** | |<img width="1697" height="994" alt="Screenshot 2025-10-12 at 9 40 18 PM" src="https://github.com/user-attachments/assets/58e7fa47-efc2-43f6-9751-67d300ee06c4" />
+
 | **Results Screen** | *Screenshot of the results screen* |
 | **Expanded Match** | *Screenshot of an expanded match* |
 | **Mastery Screen** | *Screenshot of the mastery screen* |
