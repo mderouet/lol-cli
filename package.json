@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/index.js",
     "search": "node src/index.js -r KR -i 'Faker#KR1'",
-    "build": "pkg . --targets node18-macos-arm64",
+    "build": "pkg . --targets node18-macos-arm64,node18-win-x64",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
