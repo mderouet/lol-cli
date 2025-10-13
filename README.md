@@ -1,4 +1,4 @@
-# LoL CLI Stats
+# LoL CLI 
 
 A terminal-based application to fetch and display a player's League of Legends statistics, built with Node.js and the Riot Games API.
 
