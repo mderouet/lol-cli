@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+require('dotenv').config({ path: path.resolve(path.dirname(process.execPath), '.env') });
 const { Command } = require('commander');
 const blessed = require('blessed');
 const { getSummonerDataByRiotId, getMatchHistory, getMatchDetails, getMatchTimeline } = require('./api');

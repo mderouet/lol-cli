@@ -40,7 +40,10 @@ A terminal-based application to fetch and display a player's League of Legends s
 
 ## Configuration
 
+To fetch data from the Riot Games API, you need to provide a valid API key.
+
 1.  **Create a `.env` File**
+    Create a new file named `.env` in the root of the project directory.
     ```bash
     touch .env
     ```
@@ -51,6 +54,8 @@ A terminal-based application to fetch and display a player's League of Legends s
     RIOT_API_key="your_api_key_here"
     ```
     Get a free development API key from the [Riot Developer Portal](https://developer.riotgames.com/).
+
+**Note for binary users:** If you are using the pre-built binary, you need to place the `.env` file in the same directory as the executable.
 
 ## Usage
 
