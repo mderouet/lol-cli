@@ -1,4 +1,5 @@
-# LoL CLI 
+# <img width="371" height="81" alt="fontbolt" src="https://github.com/user-attachments/assets/de5509c2-4db2-4d2c-87ad-5370e952b47b" />
+
 
 A terminal-based application to fetch and display a player's League of Legends statistics, built with Node.js and the Riot Games API.
 
