@@ -98,7 +98,10 @@ You can also pass arguments directly:
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request.
+Contributions are welcome!
+
+Please read our [Contributing Guidelines](CONTRIBUTING.md) to get started.
+Also, please read our [Code of Conduct](CODE_OF_CONDUCT.md) to understand our community standards.
 
 ## License
 
