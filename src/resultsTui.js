@@ -220,8 +220,11 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         if (name.length > 12) name = name.substring(0, 11) + '~';
         // Shorten region display
         const regionShort = acc.region.replace(/1$/, '');
-        const marker = idx === currentAccountIndex ? '>' : ' ';
-        return `${marker}${name} (${regionShort})`;
+        const display = `${name} (${regionShort})`;
+        if (idx === currentAccountIndex) {
+          return `{cyan-fg}>${display}{/cyan-fg}`;  // Selected: cyan with >
+        }
+        return ` ${display}`;  // Unselected: default yellow, space padding
       });
       return `Accounts: ${parts.join(' | ')}`;
     };
