@@ -71,6 +71,13 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     return 'Other';
   };
 
+  // Ranked filter constants and helpers
+  const RANKED_QUEUE_IDS = [420, 440];  // Solo/Duo, Flex
+
+  const isMatchRanked = (match) => {
+    return RANKED_QUEUE_IDS.includes(match.details.info.queueId);
+  };
+
   // Load participant rank cache from disk
   const diskRankCache = getParticipantRankCache(summoner.puuid);
   const RANK_TTL = 60 * 60 * 1000; // 1 hour in milliseconds
@@ -406,12 +413,18 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
       },
     });
 
+    let rankedOnly = false;  // Filter state for ranked mode
+
     const getFooterContent = (isExpanded) => {
         let content = '';
         if (hasMultipleAccounts) {
             content += 'Tab: Switch | ';
         }
-        content += 'd: Remove | Backspace: Back | m: Mastery';
+        // Filter indicator - highlight current state
+        content += rankedOnly
+            ? '{yellow-fg}r: All{/yellow-fg}'
+            : 'r: Ranked';
+        content += ' | d: Remove | c: Connect | m: Mastery';
         if (isExpanded) {
             content += ' | t: Timeline';
         }
@@ -435,6 +448,11 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     const expanded = {};
     let listIndexMap = [];
 
+    const getFilteredMatches = () => {
+      if (!rankedOnly) return matches;
+      return matches.filter(isMatchRanked);
+    };
+
     const setPanelVisibility = (visible) => {
       rankedBox.hidden = !visible;
       liveGameBox.hidden = !visible;
@@ -445,50 +463,79 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
       matchList.height = visible ? 12 : '90%';
     };
 
+    const updatePanels = (filteredMatches) => {
+      summaryBox.setContent(formatSummary(summoner, filteredMatches));
+      summaryBox.setLabel(` Last ${filteredMatches.length} Games `);
+      championStatsBox.setContent(formatChampionStats(filteredMatches, summoner.puuid));
+    };
+
     const updateList = () => {
         const items = [];
         listIndexMap = [];
         let isAnyExpanded = false;
-        matches.forEach((match, index) => {
-            const participant = match.details.info.participants.find(p => p.puuid === summoner.puuid);
-            const queueId = match.details.info.queueId;
-            const queueDesc = queueMap.get(queueId) || '';
-            const queueLabel = getShortQueueName(queueDesc, queueId).padEnd(10);
-            const role = (queueId === 1700
-                ? 'Arena'
-                : (participant.teamPosition || participant.individualPosition || '')).padEnd(10);
-            const avgRank = matchRankCache[index] ? `Avg Rank: ${colorizeRank(matchRankCache[index].average)}`.padEnd(40) : ''.padEnd(40);
-            const gameDate = new Date(match.details.info.gameCreation).toLocaleDateString().padEnd(12);
-            let resultText;
-            if (!participant.win && match.details.info.gameDuration < 300) {
-                resultText = 'Remake';
-            } else {
-                resultText = participant.win ? 'Win' : 'Loss';
-            }
-            const paddedResult = resultText.padEnd(7);
-            const championName = participant.championName.padEnd(16);
-            const kda = `KDA: ${participant.kills}/${participant.deaths}/${participant.assists}`;
-            let coloredResult;
-            if (resultText === 'Win') {
-                coloredResult = `{green-fg}${paddedResult}{/green-fg}`;
-            } else if (resultText === 'Loss') {
-                coloredResult = `{red-fg}${paddedResult}{/red-fg}`;
-            } else {
-                coloredResult = `{grey-fg}${paddedResult}{/grey-fg}`;
-            }
-            const summary = `${gameDate}${coloredResult} - ${championName}${queueLabel}${role}${kda} ${avgRank}`;
-            items.push(summary);
-            listIndexMap.push(index);
 
-            if (expanded[index]) {
-                isAnyExpanded = true;
-                const details = formatMatchDetails(match, summoner, itemMap, spellMap, runeMap, screen.width, matchRankCache[index]?.players);
-                details.split('\n').forEach(line => {
-                    items.push(line);
-                    listIndexMap.push(null);
-                });
-            }
-        });
+        const displayMatches = getFilteredMatches();
+
+        // Handle empty state
+        if (displayMatches.length === 0) {
+            items.push('{gray-fg}No ranked games in last 10 matches{/gray-fg}');
+            listIndexMap.push(null);
+        } else {
+            displayMatches.forEach((match) => {
+                const realIndex = matches.indexOf(match);  // Map back to original index
+                const participant = match.details.info.participants.find(p => p.puuid === summoner.puuid);
+                const queueId = match.details.info.queueId;
+                const queueDesc = queueMap.get(queueId) || '';
+                const queueLabel = getShortQueueName(queueDesc, queueId).padEnd(10);
+                const role = (queueId === 1700
+                    ? 'Arena'
+                    : (participant.teamPosition || participant.individualPosition || '')).padEnd(10);
+                const avgRank = matchRankCache[realIndex] ? `Avg Rank: ${colorizeRank(matchRankCache[realIndex].average)}`.padEnd(40) : ''.padEnd(40);
+                const gameDate = new Date(match.details.info.gameCreation).toLocaleDateString().padEnd(12);
+                let resultText;
+                if (!participant.win && match.details.info.gameDuration < 300) {
+                    resultText = 'Remake';
+                } else {
+                    resultText = participant.win ? 'Win' : 'Loss';
+                }
+                const paddedResult = resultText.padEnd(7);
+                const championName = participant.championName.padEnd(16);
+                const kda = `KDA: ${participant.kills}/${participant.deaths}/${participant.assists}`;
+                let coloredResult;
+                if (resultText === 'Win') {
+                    coloredResult = `{green-fg}${paddedResult}{/green-fg}`;
+                } else if (resultText === 'Loss') {
+                    coloredResult = `{red-fg}${paddedResult}{/red-fg}`;
+                } else {
+                    coloredResult = `{grey-fg}${paddedResult}{/grey-fg}`;
+                }
+                const summary = `${gameDate}${coloredResult} - ${championName}${queueLabel}${role}${kda} ${avgRank}`;
+                items.push(summary);
+                listIndexMap.push(realIndex);
+
+                if (expanded[realIndex]) {
+                    isAnyExpanded = true;
+                    const details = formatMatchDetails(match, summoner, itemMap, spellMap, runeMap, screen.width, matchRankCache[realIndex]?.players);
+                    details.split('\n').forEach(line => {
+                        items.push(line);
+                        listIndexMap.push(null);
+                    });
+                }
+            });
+        }
+
+        // Update label to show filter status
+        const count = displayMatches.length;
+        const total = matches.length;
+        const label = rankedOnly
+            ? ` Ranked Only - ${count}/${total} Games `
+            : ` Match History - ${total} Games `;
+        matchList.setLabel(label);
+
+        // Update border color to indicate filter state
+        matchList.style.border.fg = rankedOnly ? colors.yellow : colors.purple;
+        matchList.clearPos();  // Force blessed to redraw the entire element region
+
         matchList.setItems(items);
 
         // Hide/show panels based on expansion state
@@ -593,7 +640,27 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         }
     });
 
+    // r: Toggle ranked filter
+    screen.key('r', () => {
+        if (modalOpen) return;
 
+        // Toggle filter
+        rankedOnly = !rankedOnly;
+
+        // Collapse any expanded matches (clean state)
+        Object.keys(expanded).forEach(key => {
+            expanded[key] = false;
+        });
+
+        // Update all UI components with filtered data
+        const filteredMatches = getFilteredMatches();
+        updatePanels(filteredMatches);
+        updateList();
+
+        // Reset selection to top
+        matchList.select(0);
+        matchList.focus();
+    });
 
     // Save rank cache before exit
     const saveCacheAndExit = (result) => {
@@ -614,16 +681,14 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         const isAnyExpanded = Object.values(expanded).some(v => v);
 
         if (isAnyExpanded) {
-            // Collapse all expanded matches first
+            // Collapse all expanded matches
             Object.keys(expanded).forEach(key => {
                 expanded[key] = false;
             });
             updateList();
             screen.render();
-        } else {
-            // No match expanded, go back to Search screen
-            saveCacheAndExit('BACK');
         }
+        // No-op when nothing is expanded
     });
 
     // Tab: Switch to next account
@@ -638,6 +703,12 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         if (modalOpen || !hasMultipleAccounts) return;
         const prevIndex = (currentAccountIndex - 1 + totalAccounts) % totalAccounts;
         saveCacheAndExit({ action: 'SWITCH_ACCOUNT', accountIndex: prevIndex });
+    });
+
+    // c: Connect/add another account (go to search screen)
+    screen.key('c', () => {
+        if (modalOpen) return;
+        saveCacheAndExit('BACK');
     });
 
     // d: Remove current account from monitored list
