@@ -8,7 +8,7 @@ const { Command } = require('commander');
 const blessed = require('blessed');
 const { getSummonerDataByRiotId, getMatchHistory, getMatchDetails, getMatchTimeline, getRankedData, getTopChampionMasteries } = require('./api');
 const { createSearchScreen } = require('./tui');
-const { getLastSearch, saveLastSearch, getMatchCache, saveMatchCache, getMonitoredAccounts, addMonitoredAccount, removeMonitoredAccount, setActiveAccountIndex, getAccountDataCache, saveAccountDataCache } = require('./utils');
+const { getLastSearch, saveLastSearch, getMatchCache, saveMatchCache, getMonitoredAccounts, addMonitoredAccount, removeMonitoredAccount, setActiveAccountIndex, getAccountDataCache, saveAccountDataCache, loadCachedAccountByRiotId, addRankSnapshot } = require('./utils');
 const { createResultsScreen } = require('./resultsTui');
 const { createLoadingScreen } = require('./loadingTui');
 
@@ -32,6 +32,8 @@ if (!program.args.length) {
 
     const matchCache = getMatchCache(puuid);
     const matches = matchCache.matches.map(m => ({
+      matchId: m.matchId,
+      gameCreation: m.gameCreation,
       details: m.details,
       timeline: m.timeline,
     }));
@@ -44,6 +46,87 @@ if (!program.args.length) {
     };
   };
 
+  // Lightweight refresh for background updates
+  // Fetches fresh mutable data + checks for new matches (additive)
+  const refreshAccountData = async (region, puuid) => {
+    // 1. Fetch fresh mutable data in parallel
+    // Use [] as fallback for array data to maintain consistent downstream handling
+    const [rankedData, topMasteries, matchHistory] = await Promise.all([
+      getRankedData(region, puuid).catch(() => []),
+      getTopChampionMasteries(region, puuid, 5).catch(() => []),
+      getMatchHistory(region, puuid).catch(() => []),
+    ]);
+
+    // 2. Check for new matches (additive)
+    let newMatches = [];
+    if (matchHistory) {
+      const matchCache = getMatchCache(puuid);
+      const cachedMatchIds = new Set(matchCache.matches.map(m => m.matchId));
+      const newMatchIds = matchHistory.filter(id => !cachedMatchIds.has(id));
+
+      // Fetch details only for NEW matches (immutable data we don't have yet)
+      for (const matchId of newMatchIds) {
+        try {
+          const [matchDetails, matchTimeline] = await Promise.all([
+            getMatchDetails(region, matchId),
+            getMatchTimeline(region, matchId).catch(() => null), // Timeline is optional
+          ]);
+          // Validate match data structure before adding
+          if (!matchDetails?.info?.gameCreation) {
+            continue; // Skip malformed match data
+          }
+          newMatches.push({
+            matchId,
+            gameCreation: matchDetails.info.gameCreation,
+            details: matchDetails,
+            timeline: matchTimeline || null, // Fallback to null if timeline unavailable
+          });
+        } catch (e) {
+          // Skip failed fetches - one match failure shouldn't break the refresh
+          if (process.env.DEBUG) {
+            console.error(`[DEBUG] Failed to fetch match ${matchId}:`, e.message);
+          }
+        }
+      }
+
+      // 3. Add new matches to cache (preserving all existing cached matches)
+      if (newMatches.length > 0) {
+        const allMatches = [...newMatches, ...matchCache.matches];
+        allMatches.sort((a, b) => b.gameCreation - a.gameCreation);
+        matchCache.matches = allMatches;
+        matchCache.region = region;
+        saveMatchCache(puuid, matchCache);
+      }
+    }
+
+    // 4. Update account data cache with fresh mutable data
+    // Only update cache if we got actual data (not empty fallback from API failure)
+    const hasRankedData = rankedData.length > 0;
+    const hasMasteryData = topMasteries.length > 0;
+    if (hasRankedData || hasMasteryData) {
+      const accountCache = getAccountDataCache(puuid);
+      if (accountCache) {
+        saveAccountDataCache(puuid, {
+          summoner: accountCache.summoner,
+          rankedData: hasRankedData ? rankedData : accountCache.rankedData,
+          topMasteries: hasMasteryData ? topMasteries : accountCache.topMasteries,
+        });
+      }
+    }
+
+    // 5. Capture rank snapshot for historical tracking
+    if (hasRankedData) {
+      addRankSnapshot(puuid, rankedData);
+    }
+
+    return {
+      rankedData,
+      topMasteries,
+      newMatches,
+      hasUpdates: hasRankedData || newMatches.length > 0,
+    };
+  };
+
   // Helper function to load account data (full API fetch)
   const loadAccountData = async (region, riotId, screen, loading) => {
     loading.update(5, 'Fetching summoner data...');
@@ -53,7 +136,7 @@ if (!program.args.length) {
     const [rankedData, topMasteries, matchHistory] = await Promise.all([
       getRankedData(region, summoner.puuid).catch(() => []),
       getTopChampionMasteries(region, summoner.puuid, 5).catch(() => []),
-      getMatchHistory(region, summoner.puuid),
+      getMatchHistory(region, summoner.puuid).catch(() => []),
     ]);
 
     const matchCache = getMatchCache(summoner.puuid);
@@ -70,16 +153,25 @@ if (!program.args.length) {
         const matchId = newMatchIds[i];
         loading.update(null, `Fetching new match ${i + 1}/${totalNewMatches}...`);
 
-        const [matchDetails, matchTimeline] = await Promise.all([
-          getMatchDetails(region, matchId),
-          getMatchTimeline(region, matchId),
-        ]);
-        newMatches.push({
-          matchId,
-          gameCreation: matchDetails.info.gameCreation,
-          details: matchDetails,
-          timeline: matchTimeline
-        });
+        try {
+          const [matchDetails, matchTimeline] = await Promise.all([
+            getMatchDetails(region, matchId),
+            getMatchTimeline(region, matchId).catch(() => null), // Timeline is optional
+          ]);
+          // Validate match data structure before adding
+          if (!matchDetails?.info?.gameCreation) {
+            continue; // Skip malformed match data
+          }
+          newMatches.push({
+            matchId,
+            gameCreation: matchDetails.info.gameCreation,
+            details: matchDetails,
+            timeline: matchTimeline || null, // Fallback to null if timeline unavailable
+          });
+        } catch (e) {
+          // Skip failed match fetches, continue with remaining matches
+          continue;
+        }
 
         const progress = 15 + (((i + 1) / totalNewMatches) * 85);
         loading.update(progress);
@@ -94,12 +186,17 @@ if (!program.args.length) {
     saveMatchCache(summoner.puuid, matchCache);
 
     const matches = allCachedMatches.map(m => ({
+      matchId: m.matchId,
+      gameCreation: m.gameCreation,
       details: m.details,
       timeline: m.timeline,
     }));
 
     // Save account data to cache for instant switching
     saveAccountDataCache(summoner.puuid, { summoner, rankedData, topMasteries });
+
+    // Capture rank snapshot for historical tracking
+    addRankSnapshot(summoner.puuid, rankedData);
 
     loading.update(100, 'All data loaded.');
 
@@ -190,12 +287,16 @@ if (!program.args.length) {
         const cachedData = loadAccountDataFromCache(switchToPuuid);
         if (cachedData && cachedData.matches.length > 0) {
           // Use cached data - instant switch, no loading screen
+          // Note: currentAccountIndex is already set correctly from handleScreenResult or initial startup
           const monitoredData = getMonitoredAccounts();
-          currentAccountIndex = monitoredData.activeIndex;
 
+          // Create closure to capture current puuid for refresh callback
+          const puuidForRefresh = switchToPuuid;
           const result = await createResultsScreen(cachedData.summoner, cachedData.matches, region, cachedData.rankedData, cachedData.topMasteries, {
             monitoredAccounts: monitoredData,
             currentAccountIndex,
+            refreshCallback: () => refreshAccountData(region, puuidForRefresh),
+            refreshAccountCallback: refreshAccountData,
           });
 
           const handled = handleScreenResult(result);
@@ -235,9 +336,13 @@ if (!program.args.length) {
         loading.destroy();
         screen.destroy();
 
+        // Create closure to capture puuid for refresh callbacks
+        const puuidForRefresh = summoner.puuid;
         const result = await createResultsScreen(summoner, matches, region, rankedData, topMasteries, {
           monitoredAccounts: monitoredData,
           currentAccountIndex,
+          refreshCallback: () => refreshAccountData(region, puuidForRefresh),
+          refreshAccountCallback: refreshAccountData,
         });
 
         const handled = handleScreenResult(result);
@@ -254,9 +359,58 @@ if (!program.args.length) {
           continue;
         }
       } catch (error) {
-        screen.destroy();
-        console.error('\nError:', error.message);
-        break;
+        // Try to load from cache if API failed (offline mode)
+        const cachedData = loadCachedAccountByRiotId(riotId, region);
+        if (cachedData) {
+          loading.destroy();
+          screen.destroy();
+
+          // Use cached data in offline mode
+          // Note: Don't overwrite currentAccountIndex - it's already set correctly
+          // from the previous iteration or initial startup
+          const monitoredData = getMonitoredAccounts();
+
+          // Find the puuid for this account for refresh callbacks
+          const offlineAccount = monitoredData.accounts.find(
+            a => a.riotId.toLowerCase() === riotId.toLowerCase() && a.region === region
+          );
+          const offlinePuuid = offlineAccount?.puuid;
+
+          const result = await createResultsScreen(
+            cachedData.summoner,
+            cachedData.matches,
+            region,
+            cachedData.rankedData,
+            cachedData.topMasteries,
+            {
+              monitoredAccounts: monitoredData,
+              currentAccountIndex,
+              // Pass refresh callbacks to allow recovery when connectivity returns
+              refreshCallback: offlinePuuid ? () => refreshAccountData(region, offlinePuuid) : null,
+              refreshAccountCallback: refreshAccountData,
+              isOffline: true,
+            }
+          );
+
+          const handled = handleScreenResult(result);
+          if (handled.action === 'EXIT') {
+            break;
+          } else if (handled.action === 'BACK') {
+            continue;
+          } else if (handled.action === 'SWITCH') {
+            currentAccountIndex = handled.accountIndex;
+            region = handled.region;
+            riotId = handled.riotId;
+            switchToPuuid = handled.puuid;
+            skipSearch = true;
+            continue;
+          }
+        } else {
+          // No cache available, show error
+          screen.destroy();
+          console.error('\nError:', error.message);
+          break;
+        }
       }
     }
   };
