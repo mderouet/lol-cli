@@ -1,5 +1,12 @@
 const axios = require('axios');
 
+// API stats tracking
+const apiStats = {
+  pending: 0,
+};
+
+const getApiStats = () => ({ ...apiStats });
+
 const RIOT_API_KEY = process.env.RIOT_API_KEY;
 
 if (!RIOT_API_KEY) {
@@ -15,25 +22,40 @@ api.interceptors.request.use((config) => {
 });
 
 const retryWithBackoff = async (fn, maxRetries = 5, baseDelay = 1000) => {
-  let lastError;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error;
-      // Only retry on rate limit (429)
-      if (error.response?.status !== 429) {
-        handleApiError(error); // Transform and re-throw non-429 errors
+  apiStats.pending++;
+  try {
+    let lastError;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+        // Only retry on rate limit (429)
+        if (error.response?.status !== 429) {
+          handleApiError(error); // Transform and re-throw non-429 errors
+        }
+
+        // Use Retry-After header if present, otherwise exponential backoff with jitter
+        const retryAfter = error.response?.headers?.['retry-after'];
+        let delay;
+        if (retryAfter) {
+          // Parse Retry-After (could be seconds or HTTP-date)
+          // Cap at 30 seconds to prevent excessive waits from malformed headers
+          const parsed = parseInt(retryAfter, 10);
+          const rawDelay = isNaN(parsed) ? Math.max(1000, new Date(retryAfter) - Date.now()) : parsed * 1000;
+          delay = Math.min(30000, rawDelay);
+        } else {
+          // Exponential backoff with jitter (50-100% of calculated delay)
+          delay = baseDelay * Math.pow(2, attempt) * (0.5 + Math.random() * 0.5);
+        }
+
+        await new Promise(res => setTimeout(res, delay));
       }
-      // Use Retry-After header if present, otherwise exponential backoff
-      const retryAfter = error.response?.headers?.['retry-after'];
-      const delay = retryAfter
-        ? parseInt(retryAfter, 10) * 1000
-        : baseDelay * Math.pow(2, attempt);
-      await new Promise(res => setTimeout(res, delay));
     }
+    throw lastError || new Error('Max retries exceeded');
+  } finally {
+    apiStats.pending--;
   }
-  throw lastError || new Error('Max retries exceeded');
 };
 
 const handleApiError = (error) => {
@@ -89,10 +111,10 @@ const getSummonerDataByRiotId = async (region, riotId) => {
 
   const response = await retryWithBackoff(async () => {
     return api.get(
-      `${accountApiUrl}/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${tagLine}`
+      `${accountApiUrl}/riot/account/v1/accounts/by-riot-id/${encodeURIComponent(gameName)}/${encodeURIComponent(tagLine)}`
     );
   });
-  const puuid = response.data.puuid;
+  const puuid = response?.data?.puuid;
 
   if (!puuid) {
     throw new Error('Could not retrieve PUUID for the given Riot ID.');
@@ -157,11 +179,11 @@ const getTopChampionMasteries = async (region, puuid, count = 5) => {
   });
 };
 
-const getLiveGame = async (region, encryptedPUUID) => {
+const getLiveGame = async (region, puuid) => {
   return retryWithBackoff(async () => {
     try {
       const response = await api.get(
-        `https://${region}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/${encryptedPUUID}`
+        `https://${region}.api.riotgames.com/lol/spectator/v5/active-games/by-summoner/${puuid}`
       );
       return response.data;
     } catch (error) {
@@ -183,4 +205,5 @@ module.exports = {
   getChampionMastery,
   getTopChampionMasteries,
   getLiveGame,
+  getApiStats,
 };

@@ -672,6 +672,32 @@ const getRankAtTime = (puuid, timestamp, queueType = 'RANKED_SOLO_5x5') => {
   return closestSnapshot;
 };
 
+// OP.GG historical rank cache functions (no TTL - historical data is permanent)
+const getOpggCache = (puuid) => {
+  const cacheFile = path.join(ACCOUNTS_DIR, puuid, 'opgg_ranks.json');
+  return readCacheFile(
+    cacheFile,
+    null,
+    (data) => data.version === 1  // Only check version, no TTL for historical data
+  );
+};
+
+const saveOpggCache = (puuid, data) => {
+  try {
+    ensureCacheDir(puuid);
+    const cacheFile = path.join(ACCOUNTS_DIR, puuid, 'opgg_ranks.json');
+    const cacheData = {
+      version: 1,
+      puuid,
+      fetchedAt: new Date().toISOString(),
+      ...data
+    };
+    atomicWriteFileSync(cacheFile, JSON.stringify(cacheData, null, 2));
+  } catch (error) {
+    // Silent fail - caching is non-critical
+  }
+};
+
 // Launch League of Legends spectator mode
 const launchSpectate = (gameId, encryptionKey, region) => {
   // Validate inputs to prevent shell injection
@@ -745,4 +771,6 @@ module.exports = {
   saveRankHistory,
   addRankSnapshot,
   getRankAtTime,
+  getOpggCache,
+  saveOpggCache,
 };

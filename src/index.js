@@ -6,7 +6,7 @@ const envPath = process.pkg
 require('dotenv').config({ path: envPath });
 const { Command } = require('commander');
 const blessed = require('blessed');
-const { getSummonerDataByRiotId, getMatchHistory, getMatchDetails, getMatchTimeline, getRankedData, getTopChampionMasteries } = require('./api');
+const { getSummonerDataByRiotId, getMatchHistory, getMatchDetails, getRankedData, getTopChampionMasteries } = require('./api');
 const { createSearchScreen } = require('./tui');
 const { getLastSearch, saveLastSearch, getMatchCache, saveMatchCache, getMonitoredAccounts, addMonitoredAccount, removeMonitoredAccount, setActiveAccountIndex, getAccountDataCache, saveAccountDataCache, loadCachedAccountByRiotId, addRankSnapshot } = require('./utils');
 const { createResultsScreen } = require('./resultsTui');
@@ -35,7 +35,6 @@ if (!program.args.length) {
       matchId: m.matchId,
       gameCreation: m.gameCreation,
       details: m.details,
-      timeline: m.timeline,
     }));
 
     return {
@@ -65,12 +64,10 @@ if (!program.args.length) {
       const newMatchIds = matchHistory.filter(id => !cachedMatchIds.has(id));
 
       // Fetch details only for NEW matches (immutable data we don't have yet)
+      // Note: Timelines are NOT cached - they are fetched on-demand when viewing
       for (const matchId of newMatchIds) {
         try {
-          const [matchDetails, matchTimeline] = await Promise.all([
-            getMatchDetails(region, matchId),
-            getMatchTimeline(region, matchId).catch(() => null), // Timeline is optional
-          ]);
+          const matchDetails = await getMatchDetails(region, matchId);
           // Validate match data structure before adding
           if (!matchDetails?.info?.gameCreation) {
             continue; // Skip malformed match data
@@ -79,7 +76,6 @@ if (!program.args.length) {
             matchId,
             gameCreation: matchDetails.info.gameCreation,
             details: matchDetails,
-            timeline: matchTimeline || null, // Fallback to null if timeline unavailable
           });
         } catch (e) {
           // Skip failed fetches - one match failure shouldn't break the refresh
@@ -149,15 +145,13 @@ if (!program.args.length) {
       loading.update(100, 'All matches cached, loading from disk...');
     } else {
       loading.update(15, `Found ${totalNewMatches} new match(es) to fetch...`);
+      // Note: Timelines are NOT cached - they are fetched on-demand when viewing
       for (let i = 0; i < totalNewMatches; i++) {
         const matchId = newMatchIds[i];
         loading.update(null, `Fetching new match ${i + 1}/${totalNewMatches}...`);
 
         try {
-          const [matchDetails, matchTimeline] = await Promise.all([
-            getMatchDetails(region, matchId),
-            getMatchTimeline(region, matchId).catch(() => null), // Timeline is optional
-          ]);
+          const matchDetails = await getMatchDetails(region, matchId);
           // Validate match data structure before adding
           if (!matchDetails?.info?.gameCreation) {
             continue; // Skip malformed match data
@@ -166,7 +160,6 @@ if (!program.args.length) {
             matchId,
             gameCreation: matchDetails.info.gameCreation,
             details: matchDetails,
-            timeline: matchTimeline || null, // Fallback to null if timeline unavailable
           });
         } catch (e) {
           // Skip failed match fetches, continue with remaining matches
@@ -189,7 +182,6 @@ if (!program.args.length) {
       matchId: m.matchId,
       gameCreation: m.gameCreation,
       details: m.details,
-      timeline: m.timeline,
     }));
 
     // Save account data to cache for instant switching

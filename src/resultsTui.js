@@ -1,10 +1,11 @@
 const blessed = require('blessed');
 const stringWidth = require('string-width');
-const { getRankedData, getChampionMastery, getLiveGame, getApiStats } = require('./api');
-const { formatSummary, formatMatchDetails, formatRankedInfo, formatChampionStats, formatMasteryDisplay, formatRankPreview, colorizeRank, formatLPGraph } = require('./ui');
-const { delay, getItemData, getChampionData, getSummonerSpellData, getRuneData, getQueueData, getParticipantRankCache, saveParticipantRankCache, getRankedOnlyPreference, setRankedOnlyPreference, getTimeScopePreference, setTimeScopePreference, cycleTimeScope, launchSpectate, getMonitoredAccounts, setActiveAccountIndex, getRankAtTime, getRankHistory } = require('./utils');
+const { getRankedData, getChampionMastery, getLiveGame, getApiStats, getMatchTimeline } = require('./api');
+const { formatSummary, formatMatchDetails, formatRankedInfo, formatChampionStats, formatMasteryDisplay, formatRankPreview, colorizeRank, formatLPGraph, formatCompactHistoricalRanks } = require('./ui');
+const { delay, getItemData, getChampionData, getSummonerSpellData, getRuneData, getQueueData, getParticipantRankCache, saveParticipantRankCache, getRankedOnlyPreference, setRankedOnlyPreference, getTimeScopePreference, setTimeScopePreference, cycleTimeScope, launchSpectate, getMonitoredAccounts, setActiveAccountIndex, getRankAtTime, getRankHistory, getOpggCache, saveOpggCache } = require('./utils');
 const { createMasteryScreen } = require('./masteryTui');
 const { createTimelineScreen } = require('./timelineTui');
+const opgg = require('./opgg');
 
 // Pad string to target display width (handles full-width characters correctly)
 const padEndByWidth = (str, targetWidth) => {
@@ -202,6 +203,44 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     playerRankCache[puuid] = rankString;
     diskRankCache.ranks[puuid] = { rank: rankString, fetchedAt: new Date().toISOString() };
     return rankString;
+  };
+
+  // Helper to fetch OP.GG history for multiple players in parallel (disk cache only)
+  const fetchMultipleOpggHistory = async (participants) => {
+    const results = new Map();
+    const playersToFetch = [];
+
+    for (const p of participants) {
+      // Check disk cache first (no TTL - historical data is permanent)
+      const diskCached = getOpggCache(p.puuid);
+      if (diskCached) {
+        results.set(p.puuid, diskCached);
+      } else {
+        const gameName = p.riotIdGameName || p.riotId?.split('#')[0];
+        const tagLine = p.riotIdTagline || p.riotId?.split('#')[1];
+        if (gameName && tagLine) {
+          playersToFetch.push({ puuid: p.puuid, gameName, tagLine });
+        }
+      }
+    }
+
+    // Fetch uncached players in parallel
+    if (playersToFetch.length > 0) {
+      const promises = playersToFetch.map(async ({ puuid, gameName, tagLine }) => {
+        try {
+          const data = await opgg.getSummonerProfile(region, gameName, tagLine, 2);
+          if (data) {
+            saveOpggCache(puuid, data);  // Save to disk
+            results.set(puuid, data);
+          }
+        } catch (error) {
+          // Silent fail for individual players
+        }
+      });
+      await Promise.all(promises);
+    }
+
+    return results;
   };
 
   // Helper to compute match average from cached ranks
@@ -509,7 +548,7 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     const summaryBox = blessed.box({
         parent: layout,
         width: '50%',
-        height: 9,
+        height: 7,
         top: 11,
         left: 0,
         label: ` Last ${currentMatches.length} Games `,
@@ -527,7 +566,7 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     const masteryBox = blessed.box({
         parent: layout,
         width: '50%',
-        height: 9,
+        height: 7,
         top: 11,
         right: 0,
         label: ' Top Champion Masteries ',
@@ -546,8 +585,8 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     const championStatsBox = blessed.box({
         parent: layout,
         width: '100%',
-        height: 9,
-        top: 20,
+        height: 7,
+        top: 18,
         left: 0,
         label: ' Champion Stats (Recent Games) ',
         content: formatChampionStats(currentMatches, summoner.puuid),
@@ -582,22 +621,31 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     };
 
     // Format live game ranks display with team separation
-    const formatLiveRanks = (participants, ranks, currentPuuid, queueId) => {
+    const formatLiveRanks = (participants, ranks, currentPuuid, queueId, opggData = {}) => {
         const formatPlayer = (p) => {
             // Get player name from riotId (format: "name#tag")
             const rawName = p.riotId?.split('#')[0] || '???';
             const name = padEndByWidth(truncateByWidth(rawName, 10), 11);
 
             // Get champion name
-            const champName = padEndByWidth(truncateByWidth(championMap.get(String(p.championId)) || 'Unknown', 10), 11);
+            const champName = padEndByWidth(truncateByWidth(championMap.get(String(p.championId)) || 'Unknown', 8), 9);
 
-            // Get rank
+            // Get current rank
             const rank = ranks[p.puuid] || '...';
+
+            // Get historical ranks from OP.GG (compact format)
+            const playerOpgg = opggData.get?.(p.puuid);
+            const history = playerOpgg ? formatCompactHistoricalRanks(playerOpgg, 2) : '';
 
             // Highlight current user
             const prefix = p.puuid === currentPuuid ? '{cyan-fg}>{/cyan-fg}' : ' ';
 
-            return `${prefix}${name} ${champName} ${colorizeRank(rank)}`;
+            // Format: Name Champion Rank | History
+            const rankDisplay = colorizeRank(rank);
+            if (history) {
+                return `${prefix}${name} ${champName} ${rankDisplay} ${history}`;
+            }
+            return `${prefix}${name} ${champName} ${rankDisplay}`;
         };
 
         // Handle Arena mode (8 solo players with teamId 1-8)
@@ -611,9 +659,17 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         const blueTeam = participants.filter(p => p.teamId === 100);
         const redTeam = participants.filter(p => p.teamId === 200);
 
+        // Header row matching column widths
+        const headerRow = `{bold} ${'NAME'.padEnd(11)} ${'CHAMP'.padEnd(10)}RANK{/bold}`;
+        const separatorLine = '{gray-fg}' + '─'.repeat(40) + '{/gray-fg}';
+
         let content = '{cyan-fg}Blue Team{/cyan-fg}\n';
+        content += headerRow + '\n';
+        content += separatorLine + '\n';
         content += blueTeam.map(formatPlayer).join('\n');
-        content += '\n{red-fg}Red Team{/red-fg}\n';
+        content += '\n\n{red-fg}Red Team{/red-fg}\n';
+        content += headerRow + '\n';
+        content += separatorLine + '\n';
         content += redTeam.map(formatPlayer).join('\n');
         return content;
     };
@@ -641,8 +697,8 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
             liveGameBox.hidden = true;
             liveRanksBox.hidden = true;
             // Restore match list height (15 is the correct height when no live game)
-            matchList.height = 15;
-            rankPreviewBox.height = 15;
+            matchList.height = 19;
+            rankPreviewBox.height = 19;
             // Show appropriate error message based on error type
             if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND') {
                 refreshIndicator.setContent('{yellow-fg}Network error{/}');
@@ -667,8 +723,8 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
             liveGameBox.hidden = false;
             liveRanksBox.hidden = false;
             // Reduce match list height to make room for live panels at bottom
-            matchList.height = Math.max(6, screen.height - 29 - 16);
-            rankPreviewBox.height = Math.max(6, screen.height - 29 - 16);
+            matchList.height = Math.max(6, screen.height - 25 - 16);
+            rankPreviewBox.height = Math.max(6, screen.height - 25 - 16);
 
             const participant = liveGameData.participants.find(p => p.puuid === summoner.puuid);
             if (participant) {
@@ -729,8 +785,13 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
                 liveGameRanksFetched = true;
                 const gameIdAtFetch = liveGameData.gameId;
                 const queueIdAtFetch = liveGameData.gameQueueConfigId;
-                // Fetch ranks in background (non-blocking)
-                fetchLiveGameRanks(liveGameData.participants).then((ranks) => {
+                const participantsAtFetch = liveGameData.participants;
+
+                // Fetch ranks and OP.GG history in parallel (non-blocking)
+                Promise.all([
+                    fetchLiveGameRanks(participantsAtFetch),
+                    fetchMultipleOpggHistory(participantsAtFetch)
+                ]).then(([ranks, opggData]) => {
                     // Guard against stale data: only update if still viewing same game
                     if (isScreenDestroyed || currentLiveGameId !== gameIdAtFetch) return;
 
@@ -745,7 +806,7 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
                     });
                     liveGameAvgRank = rankedCount > 0 ? scoreToRank(totalScore / rankedCount) : null;
 
-                    const content = formatLiveRanks(liveGameData.participants, ranks, summoner.puuid, queueIdAtFetch);
+                    const content = formatLiveRanks(participantsAtFetch, ranks, summoner.puuid, queueIdAtFetch, opggData);
                     liveRanksBox.setContent(content);
                     screen.render();
                 }).catch(() => {
@@ -760,8 +821,8 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
             liveRanksBox.hidden = true;
             liveRanksBox.setContent('');
             // Restore match list height when no live game
-            matchList.height = 15;
-            rankPreviewBox.height = 15;
+            matchList.height = 19;
+            rankPreviewBox.height = 19;
             // Reset live game tracking
             currentLiveGameId = null;
             liveGameRanksFetched = false;
@@ -858,9 +919,9 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
 
     const matchList = blessed.list({
       parent: layout,
-      width: '60%',
-      top: 29,
-      height: 15,
+      width: '50%',
+      top: 25,
+      height: 19,
       left: 0,
       items: [],
       border: {
@@ -879,12 +940,12 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
       },
     });
 
-    // Rank preview panel (right side, 40% width)
+    // Rank preview panel (right side, 50% width)
     const rankPreviewBox = blessed.box({
       parent: layout,
-      width: '40%',
-      top: 29,
-      height: 15,
+      width: '50%',
+      top: 25,
+      height: 19,
       right: 0,
       label: ' Match Ranks ',
       tags: true,
@@ -944,6 +1005,9 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
     const expanded = {};
     let listIndexMap = [];
 
+    // Track OP.GG data fetch state per match to avoid duplicate fetches
+    const opggFetchedForMatch = {};
+
     // Define updatePreviewPanel now that listIndexMap exists
     updatePreviewPanel = () => {
       const listIndex = matchList.selected;
@@ -978,8 +1042,50 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         }
       }
 
-      rankPreviewBox.setContent(formatRankPreview(match, rankData, summoner, historicalRanks));
+      // Build OP.GG history map from disk cache
+      const opggHistoryMap = new Map();
+      if (match?.details?.info?.participants) {
+        for (const p of match.details.info.participants) {
+          const diskCached = getOpggCache(p.puuid);
+          if (diskCached) {
+            opggHistoryMap.set(p.puuid, diskCached);
+          }
+        }
+      }
+
+      rankPreviewBox.setContent(formatRankPreview(match, rankData, summoner, historicalRanks, opggHistoryMap));
       screen.render();
+
+      // Fetch OP.GG history in background if not already fetched for this match
+      if (!opggFetchedForMatch[matchIndex] && match?.details?.info?.participants) {
+        opggFetchedForMatch[matchIndex] = true;
+        fetchMultipleOpggHistory(match.details.info.participants).then(() => {
+          if (isScreenDestroyed) return;
+          // Re-render preview panel with updated OP.GG data
+          const currentListIndex = matchList.selected;
+          let currentMatchIndex = null;
+          for (let i = currentListIndex; i >= 0; i--) {
+            if (listIndexMap[i] !== null && listIndexMap[i] !== undefined) {
+              currentMatchIndex = listIndexMap[i];
+              break;
+            }
+          }
+          // Only update if user is still viewing the same match
+          if (currentMatchIndex === matchIndex) {
+            const updatedOpggMap = new Map();
+            for (const p of match.details.info.participants) {
+              const diskCached = getOpggCache(p.puuid);
+              if (diskCached) {
+                updatedOpggMap.set(p.puuid, diskCached);
+              }
+            }
+            rankPreviewBox.setContent(formatRankPreview(match, rankData, summoner, historicalRanks, updatedOpggMap));
+            screen.render();
+          }
+        }).catch(() => {
+          // Silent fail - OP.GG data is supplementary
+        });
+      }
     };
 
     // Hook navigation events for preview updates
@@ -1008,8 +1114,8 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
       masteryBox.hidden = !visible;  // Mastery always follows panel visibility
       championStatsBox.hidden = !visible;
       rankPreviewBox.hidden = !visible;
-      matchList.top = visible ? 29 : 2;
-      matchList.width = visible ? '60%' : '100%';  // Full width when expanded
+      matchList.top = visible ? 25 : 2;
+      matchList.width = visible ? '50%' : '100%';  // Full width when expanded
 
       // Handle live game panels, LP graph, and match list height
       const isLiveGame = !!currentLiveGameData;
@@ -1024,8 +1130,8 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
         liveGameBox.hidden = !isLiveGame;
         liveRanksBox.hidden = !isLiveGame;
         lpGraphBox.hidden = false;  // LP graph always visible (no layout conflict with live panels)
-        matchList.height = isLiveGame ? Math.max(6, screen.height - 29 - 16) : 15;
-        rankPreviewBox.height = isLiveGame ? Math.max(6, screen.height - 29 - 16) : 15;
+        matchList.height = isLiveGame ? Math.max(6, screen.height - 25 - 16) : 19;
+        rankPreviewBox.height = isLiveGame ? Math.max(6, screen.height - 25 - 16) : 19;
       }
     };
 
@@ -1102,7 +1208,7 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
                 const queueLabel = getShortQueueName(queueDesc, queueId).padEnd(10);
                 const roleMap = { TOP: 'TOP', JUNGLE: 'JGL', MIDDLE: 'MID', BOTTOM: 'BOT', UTILITY: 'SUP' };
                 const rawRole = queueId === 1700 ? 'Arena' : (participant.teamPosition || participant.individualPosition || '');
-                const role = (roleMap[rawRole] || rawRole).padEnd(6);
+                const role = (rawRole === 'Invalid' || rawRole === '' || queueId === 450) ? '      ' : (roleMap[rawRole] || rawRole).padEnd(6);
                 const avgRank = matchRankCache[realIndex]
                   ? `Avg: ${colorizeRank(matchRankCache[realIndex].average.padEnd(12))}`
                   : '';
@@ -1708,6 +1814,47 @@ const createResultsScreen = async (summoner, matches, region, rankedData, topMas
 
     // Start background refresh after initial render (fire and forget)
     refreshStaleRanks().catch(() => {});
+
+    // Pre-fetch OP.GG historical data for all match participants in background
+    const preloadOpggHistory = async () => {
+      // Collect unique participants across all matches
+      const seenPuuids = new Set();
+      const participantsToFetch = [];
+
+      for (const match of currentMatches) {
+        for (const p of match.details.info.participants) {
+          if (seenPuuids.has(p.puuid)) continue;
+          seenPuuids.add(p.puuid);
+
+          // Skip if already cached on disk
+          if (getOpggCache(p.puuid)) continue;
+
+          const gameName = p.riotIdGameName;
+          const tagLine = p.riotIdTagline;
+          if (gameName && tagLine) {
+            participantsToFetch.push({ puuid: p.puuid, gameName, tagLine });
+          }
+        }
+      }
+
+      // Fetch in batches to avoid overwhelming the API
+      const BATCH_SIZE = 5;
+      for (let i = 0; i < participantsToFetch.length; i += BATCH_SIZE) {
+        if (isScreenDestroyed) return;
+        const batch = participantsToFetch.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(async ({ puuid, gameName, tagLine }) => {
+          try {
+            const data = await opgg.getSummonerProfile(region, gameName, tagLine, 2);
+            if (data) saveOpggCache(puuid, data);
+          } catch (error) {
+            // Silent fail
+          }
+        }));
+      }
+    };
+
+    // Start OP.GG pre-fetch in background (fire and forget)
+    preloadOpggHistory().catch(() => {});
   });
 };
 

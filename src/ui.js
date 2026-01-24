@@ -113,6 +113,120 @@ const colorizeRank = (rank) => {
     return `{${color}-fg}${rank}{/${color}-fg}`;
 };
 
+// Get color for a tier
+const getTierColor = (tier) => {
+  const colors = {
+    'CHALLENGER': '#f1fa8c',
+    'GRANDMASTER': '#ff5555',
+    'MASTER': '#ff79c6',
+    'DIAMOND': '#8be9fd',
+    'EMERALD': '#50fa7b',
+    'PLATINUM': '#8be9fd',
+    'GOLD': '#f1fa8c',
+    'SILVER': '#f8f8f2',
+    'BRONZE': '#cd7f32',
+    'IRON': '#a9a9a9'
+  };
+  return colors[tier] || '#f8f8f2';
+};
+
+/**
+ * Format historical ranks from OP.GG data for display
+ * @param {Object} opggData - Data from opgg.getSummonerProfile()
+ * @param {number} maxYears - Max years of history to show
+ * @returns {string} Formatted string like "S25: SILVER IV | S25 Flex: BRONZE I | S24: GOLD II"
+ */
+const formatHistoricalRanks = (opggData, maxYears = 2) => {
+  if (!opggData?.history?.length) return '';
+
+  const parts = [];
+  const currentYear = new Date().getFullYear();
+
+  opggData.history.forEach(entry => {
+    // Only include entries within maxYears
+    if (entry.year < currentYear - maxYears) return;
+
+    const seasonLabel = `S${entry.year.toString().slice(-2)}`;
+
+    if (entry.solo) {
+      const color = getTierColor(entry.solo.tier);
+      parts.push(`{${color}-fg}${seasonLabel}: ${entry.solo.rank}{/${color}-fg}`);
+    }
+    if (entry.flex) {
+      const color = getTierColor(entry.flex.tier);
+      parts.push(`{${color}-fg}${seasonLabel} Flex: ${entry.flex.rank}{/${color}-fg}`);
+    }
+  });
+
+  return parts.join(' | ');
+};
+
+/**
+ * Format historical ranks in compact form for live game display
+ * @param {Object} opggData - Data from opgg.getSummonerProfile()
+ * @param {number} maxYears - Max years of history to show
+ * @returns {string} Compact format like "S25: S4 | S24: G2" (SILVER IV, GOLD II)
+ */
+const formatCompactHistoricalRanks = (opggData, maxYears = 2) => {
+  if (!opggData?.history?.length) return '';
+
+  // Tier abbreviations
+  const tierAbbr = {
+    'CHALLENGER': 'C', 'GRANDMASTER': 'GM', 'MASTER': 'M',
+    'DIAMOND': 'D', 'EMERALD': 'E', 'PLATINUM': 'P',
+    'GOLD': 'G', 'SILVER': 'S', 'BRONZE': 'B', 'IRON': 'I'
+  };
+
+  // Division to number (IV -> 4, III -> 3, etc.)
+  const divToNum = { 'I': '1', 'II': '2', 'III': '3', 'IV': '4' };
+
+  const parts = [];
+  const currentYear = new Date().getFullYear();
+
+  opggData.history.forEach(entry => {
+    if (entry.year < currentYear - maxYears) return;
+
+    const seasonLabel = `S${entry.year.toString().slice(-2)}`;
+
+    if (entry.solo) {
+      const abbr = tierAbbr[entry.solo.tier] || entry.solo.tier[0];
+      const div = entry.solo.division ? divToNum[entry.solo.division] || '' : '';
+      const color = getTierColor(entry.solo.tier);
+      parts.push(`{${color}-fg}${seasonLabel}: ${abbr}${div}{/${color}-fg}`);
+    }
+    if (entry.flex) {
+      const abbr = tierAbbr[entry.flex.tier] || entry.flex.tier[0];
+      const div = entry.flex.division ? divToNum[entry.flex.division] || '' : '';
+      const color = getTierColor(entry.flex.tier);
+      parts.push(`{${color}-fg}${seasonLabel}F: ${abbr}${div}{/${color}-fg}`);
+    }
+  });
+
+  return parts.join(' | ');
+};
+
+/**
+ * Format current rank with optional peak rank
+ * @param {Object} opggData - Data from opgg.getSummonerProfile()
+ * @returns {string} Formatted current rank with peak if different
+ */
+const formatCurrentWithPeak = (opggData) => {
+  if (!opggData?.current?.solo) return '';
+
+  const current = opggData.current.solo;
+  const peak = opggData.peak?.solo;
+
+  let result = colorizeRank(current.rank);
+
+  // Show peak if it's different from current
+  if (peak && peak.rank !== current.rank) {
+    const peakColor = getTierColor(peak.tier);
+    result += ` (Peak: {${peakColor}-fg}${peak.rank}{/${peakColor}-fg})`;
+  }
+
+  return result;
+};
+
 const padStringWithTags = (str, length) => {
   const visibleLength = str.replace(/{[^{}]*}/g, '').length;
   const padding = ' '.repeat(Math.max(0, length - visibleLength));
@@ -160,14 +274,17 @@ const formatMatchDetails = (match, summoner, itemMap, spellMap, runeMap, termina
                    `Deaths:  ${createBar(participant.deaths, 'red')}\n` +
                    `Assists: ${createBar(participant.assists, 'magenta')}`;
 
-  // Gold Graph
-  const participantId = participant.participantId;
-  const goldFrames = match.timeline.info.frames.map(frame => frame.participantFrames[String(participantId)].totalGold);
-  const graphWidth = Math.floor(terminalWidth * 0.8);
-  const resampledGold = resampleData(goldFrames, graphWidth);
-  const goldChart = asciichart.plot(resampledGold, { height: 8 });
-  const xAxis = createXAxis(Math.floor(match.details.info.gameDuration / 60), graphWidth);
-  const goldGraph = `{bold}Gold Generation:{/bold}\n{yellow-fg}${goldChart}{/yellow-fg}\n${xAxis}`;
+  // Gold Graph (only if timeline data is available - timelines are fetched on-demand)
+  let goldGraph = '';
+  if (match.timeline?.info?.frames) {
+    const participantId = participant.participantId;
+    const goldFrames = match.timeline.info.frames.map(frame => frame.participantFrames[String(participantId)].totalGold);
+    const graphWidth = Math.floor(terminalWidth * 0.8);
+    const resampledGold = resampleData(goldFrames, graphWidth);
+    const goldChart = asciichart.plot(resampledGold, { height: 8 });
+    const xAxis = createXAxis(Math.floor(match.details.info.gameDuration / 60), graphWidth);
+    goldGraph = `{bold}Gold Generation:{/bold}\n{yellow-fg}${goldChart}{/yellow-fg}\n${xAxis}`;
+  }
 
   // Items
   const items = [
@@ -232,7 +349,9 @@ const formatMatchDetails = (match, summoner, itemMap, spellMap, runeMap, termina
     rankText += `{red-fg}Red Team:{/red-fg}\n${formatTeam(team2)}`;
   }
 
-  return `\n${frame('Details', detailsSummary)}\n\n${frame('KDA', kdaGraph)}\n\n${frame('Gold', goldGraph)}\n\n${frame('Items', itemsText)}\n\n${frame('Spells', spellsText)}\n\n${frame('Runes', runesText)}\n\n${frame('Ranks', rankText)}\n`;
+  // Build output, conditionally including gold graph only if timeline data was available
+  const goldSection = goldGraph ? `\n\n${frame('Gold', goldGraph)}` : '';
+  return `\n${frame('Details', detailsSummary)}\n\n${frame('KDA', kdaGraph)}${goldSection}\n\n${frame('Items', itemsText)}\n\n${frame('Spells', spellsText)}\n\n${frame('Runes', runesText)}\n\n${frame('Ranks', rankText)}\n`;
 };
 // Helper functions for graphs
 const resampleData = (data, targetWidth) => {
@@ -338,7 +457,7 @@ const formatMasteryDisplay = (masteries, championMap) => {
   return lines.join('\n');
 };
 
-const formatRankPreview = (match, rankData, summoner, historicalRanks = {}) => {
+const formatRankPreview = (match, rankData, summoner, historicalRanks = {}, opggHistoryMap = new Map()) => {
   if (!match) return '';
 
   const participants = match.details.info.participants;
@@ -350,7 +469,20 @@ const formatRankPreview = (match, rankData, summoner, historicalRanks = {}) => {
   const greenThreshold = 4.0;
   const redThreshold = 1.5;
 
+  // Tier abbreviations for compact display
+  const tierAbbr = {
+    'CHALLENGER': 'C', 'GRANDMASTER': 'GM', 'MASTER': 'M',
+    'DIAMOND': 'D', 'EMERALD': 'E', 'PLATINUM': 'P',
+    'GOLD': 'G', 'SILVER': 'S', 'BRONZE': 'B', 'IRON': 'I'
+  };
+  const divToNum = { 'I': '1', 'II': '2', 'III': '3', 'IV': '4' };
+
   const roleMap = { TOP: 'TOP', JUNGLE: 'JGL', MIDDLE: 'MID', BOTTOM: 'BOT', UTILITY: 'SUP', ARENA: '---' };
+
+  // Header row matching column widths
+  const headerRow = `{bold} ${'NAME'.padEnd(11)} ${'ROLE'.padEnd(5)}${'CHAMP'.padEnd(10)}${'K/D/A'.padEnd(10)}${'CURRENT'.padEnd(13)}HISTORY{/bold}`;
+  const separatorLine = '{gray-fg}' + '─'.repeat(58) + '{/gray-fg}';
+
   const formatPlayer = (p) => {
     const isCurrentUser = p.puuid === summoner.puuid;
     // Use historical rank for monitored accounts if available, otherwise use current rank
@@ -369,22 +501,48 @@ const formatRankPreview = (match, rankData, summoner, historicalRanks = {}) => {
     // Color-code KDA: green for good performance, red for poor performance
     let coloredKda;
     if (playerKda >= greenThreshold) {
-      coloredKda = `{green-fg}${kdaStr.padEnd(7)}{/green-fg}`;
+      coloredKda = `{green-fg}${kdaStr.padEnd(9)}{/green-fg}`;
     } else if (playerKda <= redThreshold) {
-      coloredKda = `{red-fg}${kdaStr.padEnd(7)}{/red-fg}`;
+      coloredKda = `{red-fg}${kdaStr.padEnd(9)}{/red-fg}`;
     } else {
-      coloredKda = kdaStr.padEnd(7);
+      coloredKda = kdaStr.padEnd(9);
     }
     const rawRole = queueId === 1700 ? 'ARENA' : (p.teamPosition || p.individualPosition || '');
     const role = roleMap[rawRole] || rawRole.substring(0, 3);
     const prefix = isCurrentUser ? '>' : ' ';
-    const coloredRank = colorizeRank(rank);
-    return `${prefix}${name} ${role.padEnd(4)} ${champ} ${coloredKda} ${coloredRank}`;
+    const coloredRank = padStringWithTags(colorizeRank(rank), 12);
+
+    // Get OP.GG historical data (compact format: S25: G2 | S24: S4)
+    const opggData = opggHistoryMap.get?.(p.puuid);
+    let historyStr = '';
+    if (opggData?.history?.length > 0) {
+      const currentYear = new Date().getFullYear();
+      const parts = [];
+      opggData.history.slice(0, 3).forEach(entry => {  // Limit to 3 entries for space
+        if (entry.year < currentYear - 2) return;
+        const seasonLabel = `S${entry.year.toString().slice(-2)}`;
+        if (entry.solo) {
+          const abbr = tierAbbr[entry.solo.tier] || entry.solo.tier[0];
+          const div = entry.solo.division ? divToNum[entry.solo.division] || '' : '';
+          const color = getTierColor(entry.solo.tier);
+          parts.push(`{${color}-fg}${seasonLabel}:${abbr}${div}{/${color}-fg}`);
+        }
+      });
+      if (parts.length > 0) {
+        historyStr = ` ${parts.join(' ')}`;
+      }
+    }
+
+    return `${prefix}${name} ${role.padEnd(4)} ${champ} ${coloredKda} ${coloredRank}${historyStr}`;
   };
 
   let content = '{cyan-fg}Blue Team{/cyan-fg}\n';
+  content += headerRow + '\n';
+  content += separatorLine + '\n';
   content += team1.map(formatPlayer).join('\n');
   content += '\n\n{red-fg}Red Team{/red-fg}\n';
+  content += headerRow + '\n';
+  content += separatorLine + '\n';
   content += team2.map(formatPlayer).join('\n');
 
   return content;
@@ -544,11 +702,10 @@ const formatLPGraph = (snapshots, width, height, queueType = 'RANKED_SOLO_5x5') 
   let markers = '';
   const chartWidth = data.length;
 
-  for (let i = 1; i < filtered.length && i < chartWidth; i++) {
-    const prev = filtered[i - 1];
-    const curr = filtered[i];
-    const prevLP = rankToAbsoluteLP(prev.tier, prev.rank, prev.leaguePoints);
-    const currLP = rankToAbsoluteLP(curr.tier, curr.rank, curr.leaguePoints);
+  // Generate markers from resampled data array to match chart points
+  for (let i = 1; i < data.length; i++) {
+    const prevLP = data[i - 1];
+    const currLP = data[i];
 
     if (currLP > prevLP) {
       markers += '{green-fg}W{/green-fg}';
@@ -560,8 +717,8 @@ const formatLPGraph = (snapshots, width, height, queueType = 'RANKED_SOLO_5x5') 
   }
 
   // Add colored markers below the chart (aligned with data points)
-  // The chart has a Y-axis label taking ~8 chars, so we pad accordingly
-  const markerPadding = ' '.repeat(8);
+  // The chart has a Y-axis label, so we pad accordingly
+  const markerPadding = ' '.repeat(yAxisWidth + 1);
   const markerLine = markerPadding + markers;
 
   return modifiedChart + '\n' + markerLine;
@@ -577,4 +734,8 @@ module.exports = {
   colorizeRank,
   rankToAbsoluteLP,
   formatLPGraph,
+  formatHistoricalRanks,
+  formatCompactHistoricalRanks,
+  formatCurrentWithPeak,
+  getTierColor,
 };
